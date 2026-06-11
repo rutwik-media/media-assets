@@ -1,0 +1,74 @@
+name: Compress Raw Video Uploads
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'media/raw/**'
+
+permissions:
+  contents: write
+
+jobs:
+  compress:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install FFmpeg and jq
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg jq
+
+      - name: Process Videos
+        run: |
+          cd media/raw/
+
+          shopt -s nullglob
+          for config in *.json; do
+            base="${config%.json}"
+            echo "Processing video base: $base"
+
+            # Read config
+            crf=$(jq -r '.crf' "$config")
+            mute=$(jq -r '.muteVideo' "$config")
+            width=$(jq -r '.scaleStr' "$config" | grep -oP "min\(\K[0-9]+")
+
+            echo "  crf=$crf  width=$width  mute=$mute"
+
+            # Reassemble parts
+            echo "  Concatenating parts..."
+            ls "$base".part* | sort -V | xargs cat > "raw_$base"
+
+            # Build FFmpeg args array
+            FFMPEG_ARGS=(-i "raw_$base" -vf "scale=min($width\\,iw):-2" -c:v libx264 -crf "$crf" -preset fast)
+
+            if [ "$mute" = "true" ]; then
+              FFMPEG_ARGS+=(-an)
+            fi
+
+            OUTPUT="../${base}.mp4"
+            echo "  Output: $OUTPUT"
+            ffmpeg "${FFMPEG_ARGS[@]}" "$OUTPUT"
+
+            # Cleanup raw files
+            echo "  Cleaning up..."
+            rm "raw_$base"
+            rm "$base".part* 2>/dev/null || true
+            rm "$config"
+          done
+
+      - name: Commit and Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add media/
+
+          # Only commit if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Auto-compressed video via FFmpeg"
+            git push
+          fi
